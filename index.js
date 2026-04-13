@@ -12,32 +12,40 @@ const sessionString = process.env.TELEGRAM_SESSION;
 const SERVICE_SECRET = process.env.SERVICE_SECRET || 'secret';
 
 let client = null;
+let isConnecting = false;
 
-// Keep persistent connection
-const initClient = async () => {
-  client = new TelegramClient(new StringSession(sessionString), apiId, apiHash, {
-    connectionRetries: 999,
-    autoReconnect: true,
-    retryDelay: 1000,
-    useWSS: false,
-  });
-  await client.connect();
-  console.log('[TG] Connected');
-
-  // Ping every 20s to keep connection alive
-  setInterval(async () => {
+const ensureConnected = async () => {
+  if (isConnecting) {
+    // Wait for ongoing connection
+    await new Promise(resolve => setTimeout(resolve, 3000));
+  }
+  if (!client || !client.connected) {
+    isConnecting = true;
     try {
-      if (!client.connected) {
-        console.log('[TG] Reconnecting...');
-        await client.connect();
+      if (!client) {
+        client = new TelegramClient(new StringSession(sessionString), apiId, apiHash, {
+          connectionRetries: 10,
+          autoReconnect: true,
+          retryDelay: 1000,
+        });
       }
-      await client.invoke(new Api.Ping({ pingId: BigInt(Date.now()) }));
-    } catch (e) {
-      console.log('[TG] Ping error:', e.message);
-      try { await client.connect(); } catch {}
+      await client.connect();
+      console.log('[TG] Connected');
+    } finally {
+      isConnecting = false;
     }
-  }, 20000);
+  }
 };
+
+// Keep alive ping every 30s
+setInterval(async () => {
+  try {
+    await ensureConnected();
+    await client.invoke(new Api.Ping({ pingId: BigInt(Date.now()) }));
+  } catch (e) {
+    console.log('[TG] Ping error:', e.message);
+  }
+}, 30000);
 
 // Auth middleware
 const auth = (req, res, next) => {
@@ -55,11 +63,7 @@ app.post('/send-stars', auth, async (req, res) => {
   }
 
   try {
-    // Ensure connected before request
-    if (!client.connected) {
-      console.log('[TG] Reconnecting before request...');
-      await client.connect();
-    }
+    await ensureConnected();
 
     const users = await client.invoke(new Api.users.GetUsers({
       id: [new Api.InputUser({ userId: BigInt(telegram_user_id), accessHash: BigInt(0) })],
@@ -101,11 +105,11 @@ app.post('/send-stars', auth, async (req, res) => {
   }
 });
 
-// Health check
-app.get('/', (req, res) => res.json({ status: 'ok' }));
+app.get('/', (req, res) => res.json({ status: 'ok', connected: client?.connected || false }));
 
 const PORT = process.env.PORT || 3001;
-initClient().then(() => {
+
+ensureConnected().then(() => {
   app.listen(PORT, () => console.log(`[Server] Running on port ${PORT}`));
 }).catch(err => {
   console.error('[TG] Init failed:', err.message);
