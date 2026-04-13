@@ -108,7 +108,6 @@ app.post('/send-stars', auth, async (req, res) => {
 app.get('/', (req, res) => res.json({ status: 'ok', connected: client?.connected || false }));
 
 const PORT = process.env.PORT || 3001;
-
 ensureConnected().then(() => {
   app.listen(PORT, () => console.log(`[Server] Running on port ${PORT}`));
 }).catch(err => {
