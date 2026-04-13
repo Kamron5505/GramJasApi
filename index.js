@@ -10,42 +10,21 @@ const apiId = parseInt(process.env.TELEGRAM_API_ID);
 const apiHash = process.env.TELEGRAM_API_HASH;
 const sessionString = process.env.TELEGRAM_SESSION;
 const SERVICE_SECRET = process.env.SERVICE_SECRET || 'secret';
+const PORT = process.env.PORT || 8080;
 
 let client = null;
-let isConnecting = false;
 
-const ensureConnected = async () => {
-  if (isConnecting) {
-    // Wait for ongoing connection
-    await new Promise(resolve => setTimeout(resolve, 3000));
-  }
-  if (!client || !client.connected) {
-    isConnecting = true;
-    try {
-      if (!client) {
-        client = new TelegramClient(new StringSession(sessionString), apiId, apiHash, {
-          connectionRetries: 10,
-          autoReconnect: true,
-          retryDelay: 1000,
-        });
-      }
-      await client.connect();
-      console.log('[TG] Connected');
-    } finally {
-      isConnecting = false;
-    }
-  }
+const createClient = () => new TelegramClient(new StringSession(sessionString), apiId, apiHash, {
+  connectionRetries: 5,
+  autoReconnect: true,
+  retryDelay: 2000,
+});
+
+const getClient = async () => {
+  if (!client) client = createClient();
+  if (!client.connected) await client.connect();
+  return client;
 };
-
-// Keep alive ping every 30s
-setInterval(async () => {
-  try {
-    await ensureConnected();
-    await client.invoke(new Api.Ping({ pingId: BigInt(Date.now()) }));
-  } catch (e) {
-    console.log('[TG] Ping error:', e.message);
-  }
-}, 30000);
 
 // Auth middleware
 const auth = (req, res, next) => {
@@ -55,7 +34,10 @@ const auth = (req, res, next) => {
   next();
 };
 
-// POST /send-stars
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', connected: client?.connected || false });
+});
+
 app.post('/send-stars', auth, async (req, res) => {
   const { telegram_user_id, amount } = req.body;
   if (!telegram_user_id || !amount) {
@@ -63,9 +45,9 @@ app.post('/send-stars', auth, async (req, res) => {
   }
 
   try {
-    await ensureConnected();
+    const tg = await getClient();
 
-    const users = await client.invoke(new Api.users.GetUsers({
+    const users = await tg.invoke(new Api.users.GetUsers({
       id: [new Api.InputUser({ userId: BigInt(telegram_user_id), accessHash: BigInt(0) })],
     }));
 
@@ -73,11 +55,10 @@ app.post('/send-stars', auth, async (req, res) => {
     const user = users[0];
     const inputUser = new Api.InputUser({ userId: user.id, accessHash: user.accessHash });
 
-    const giftOptions = await client.invoke(new Api.payments.GetStarsGiftOptions({ userId: inputUser }));
+    const giftOptions = await tg.invoke(new Api.payments.GetStarsGiftOptions({ userId: inputUser }));
     const option = giftOptions.find(o => parseInt(o.stars) === parseInt(amount));
     if (!option) {
-      const available = giftOptions.map(o => o.stars.toString()).join(', ');
-      throw new Error(`No option for ${amount} stars. Available: ${available}`);
+      throw new Error(`No option for ${amount} stars. Available: ${giftOptions.map(o => o.stars).join(', ')}`);
     }
 
     const purpose = new Api.InputStorePaymentStarsGift({
@@ -87,11 +68,11 @@ app.post('/send-stars', auth, async (req, res) => {
       amount: option.amount,
     });
 
-    const form = await client.invoke(new Api.payments.GetPaymentForm({
+    const form = await tg.invoke(new Api.payments.GetPaymentForm({
       invoice: new Api.InputInvoiceStars({ purpose }),
     }));
 
-    await client.invoke(new Api.payments.SendStarsForm({
+    await tg.invoke(new Api.payments.SendStarsForm({
       formId: form.formId,
       invoice: new Api.InputInvoiceStars({ purpose }),
     }));
@@ -101,16 +82,17 @@ app.post('/send-stars', auth, async (req, res) => {
 
   } catch (err) {
     console.error('[TG] Error:', err.message);
+    // Reset client on connection error
+    if (err.message.includes('Not connected') || err.message.includes('connection')) {
+      client = null;
+    }
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.get('/', (req, res) => res.json({ status: 'ok', connected: client?.connected || false }));
-
-const PORT = process.env.PORT || 3001;
-ensureConnected().then(() => {
-  app.listen(PORT, () => console.log(`[Server] Running on port ${PORT}`));
-}).catch(err => {
-  console.error('[TG] Init failed:', err.message);
-  process.exit(1);
+// Start HTTP server immediately
+app.listen(PORT, () => {
+  console.log(`[Server] Running on port ${PORT}`);
+  // Connect TG in background
+  getClient().then(() => console.log('[TG] Ready')).catch(e => console.error('[TG] Init error:', e.message));
 });
