@@ -20,25 +20,23 @@ const initClient = async () => {
     autoReconnect: true,
     retryDelay: 1000,
     useWSS: false,
-    proxy: {
-      ip: 'mtproto.telegram.org',
-      port: 443,
-      MTProxy: true,
-      secret: 'ee367a189aee18fa31c190054efd4a8824',
-    },
   });
   await client.connect();
-  console.log('[TG] Connected via MTProxy');
+  console.log('[TG] Connected');
 
+  // Ping every 20s to keep connection alive
   setInterval(async () => {
     try {
+      if (!client.connected) {
+        console.log('[TG] Reconnecting...');
+        await client.connect();
+      }
       await client.invoke(new Api.Ping({ pingId: BigInt(Date.now()) }));
-      console.log('[TG] Ping OK');
     } catch (e) {
-      console.log('[TG] Ping failed, reconnecting...');
+      console.log('[TG] Ping error:', e.message);
       try { await client.connect(); } catch {}
     }
-  }, 30000);
+  }, 20000);
 };
 
 // Auth middleware
@@ -57,6 +55,12 @@ app.post('/send-stars', auth, async (req, res) => {
   }
 
   try {
+    // Ensure connected before request
+    if (!client.connected) {
+      console.log('[TG] Reconnecting before request...');
+      await client.connect();
+    }
+
     const users = await client.invoke(new Api.users.GetUsers({
       id: [new Api.InputUser({ userId: BigInt(telegram_user_id), accessHash: BigInt(0) })],
     }));
