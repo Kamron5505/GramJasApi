@@ -12,21 +12,24 @@ const sessionString = process.env.TELEGRAM_SESSION;
 const SERVICE_SECRET = process.env.SERVICE_SECRET || 'secret';
 const PORT = process.env.PORT || 8080;
 
-let client = null;
-
-const createClient = () => new TelegramClient(new StringSession(sessionString), apiId, apiHash, {
-  connectionRetries: 5,
+const newClient = () => new TelegramClient(new StringSession(sessionString), apiId, apiHash, {
+  connectionRetries: 3,
   autoReconnect: true,
-  retryDelay: 2000,
+  retryDelay: 1000,
 });
 
-const getClient = async () => {
-  if (!client) client = createClient();
-  if (!client.connected) await client.connect();
-  return client;
+let client = newClient();
+
+const connect = async () => {
+  try {
+    await client.connect();
+    console.log('[TG] Connected');
+  } catch (e) {
+    console.error('[TG] Connect error:', e.message);
+  }
 };
 
-// Auth middleware
+// Auth
 const auth = (req, res, next) => {
   if (req.headers['x-service-secret'] !== SERVICE_SECRET) {
     return res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -34,9 +37,30 @@ const auth = (req, res, next) => {
   next();
 };
 
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', connected: client?.connected || false });
-});
+// Invoke with auto-retry on disconnect
+const invoke = async (method, retries = 3) => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      if (!client.connected) {
+        console.log('[TG] Not connected, reconnecting...');
+        client = newClient();
+        await client.connect();
+      }
+      return await client.invoke(method);
+    } catch (e) {
+      console.error(`[TG] Invoke error (attempt ${i+1}):`, e.message);
+      if (i < retries - 1) {
+        client = newClient();
+        await client.connect();
+        await new Promise(r => setTimeout(r, 1000));
+      } else {
+        throw e;
+      }
+    }
+  }
+};
+
+app.get('/', (req, res) => res.json({ status: 'ok', connected: client?.connected || false }));
 
 app.post('/send-stars', auth, async (req, res) => {
   const { telegram_user_id, amount } = req.body;
@@ -45,21 +69,17 @@ app.post('/send-stars', auth, async (req, res) => {
   }
 
   try {
-    const tg = await getClient();
-
-    const users = await tg.invoke(new Api.users.GetUsers({
+    const users = await invoke(new Api.users.GetUsers({
       id: [new Api.InputUser({ userId: BigInt(telegram_user_id), accessHash: BigInt(0) })],
     }));
 
-    if (!users || !users[0]) throw new Error(`User ${telegram_user_id} not found`);
+    if (!users?.[0]) throw new Error(`User ${telegram_user_id} not found`);
     const user = users[0];
     const inputUser = new Api.InputUser({ userId: user.id, accessHash: user.accessHash });
 
-    const giftOptions = await tg.invoke(new Api.payments.GetStarsGiftOptions({ userId: inputUser }));
+    const giftOptions = await invoke(new Api.payments.GetStarsGiftOptions({ userId: inputUser }));
     const option = giftOptions.find(o => parseInt(o.stars) === parseInt(amount));
-    if (!option) {
-      throw new Error(`No option for ${amount} stars. Available: ${giftOptions.map(o => o.stars).join(', ')}`);
-    }
+    if (!option) throw new Error(`No option for ${amount} stars. Available: ${giftOptions.map(o => o.stars).join(', ')}`);
 
     const purpose = new Api.InputStorePaymentStarsGift({
       userId: inputUser,
@@ -68,11 +88,11 @@ app.post('/send-stars', auth, async (req, res) => {
       amount: option.amount,
     });
 
-    const form = await tg.invoke(new Api.payments.GetPaymentForm({
+    const form = await invoke(new Api.payments.GetPaymentForm({
       invoice: new Api.InputInvoiceStars({ purpose }),
     }));
 
-    await tg.invoke(new Api.payments.SendStarsForm({
+    await invoke(new Api.payments.SendStarsForm({
       formId: form.formId,
       invoice: new Api.InputInvoiceStars({ purpose }),
     }));
@@ -82,17 +102,11 @@ app.post('/send-stars', auth, async (req, res) => {
 
   } catch (err) {
     console.error('[TG] Error:', err.message);
-    // Reset client on connection error
-    if (err.message.includes('Not connected') || err.message.includes('connection')) {
-      client = null;
-    }
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Start HTTP server immediately
 app.listen(PORT, () => {
   console.log(`[Server] Running on port ${PORT}`);
-  // Connect TG in background
-  getClient().then(() => console.log('[TG] Ready')).catch(e => console.error('[TG] Init error:', e.message));
+  connect();
 });
