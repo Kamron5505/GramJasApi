@@ -18,18 +18,27 @@ const initClient = async () => {
   client = new TelegramClient(new StringSession(sessionString), apiId, apiHash, {
     connectionRetries: 999,
     autoReconnect: true,
-    retryDelay: 2000,
-    useWSS: true,
+    retryDelay: 1000,
+    useWSS: false,
+    proxy: {
+      ip: 'mtproto.telegram.org',
+      port: 443,
+      MTProxy: true,
+      secret: 'ee367a189aee18fa31c190054efd4a8824',
+    },
   });
   await client.connect();
-  console.log('[TG] Connected');
+  console.log('[TG] Connected via MTProxy');
 
-  // Keep alive ping every 60s
   setInterval(async () => {
     try {
       await client.invoke(new Api.Ping({ pingId: BigInt(Date.now()) }));
-    } catch {}
-  }, 60000);
+      console.log('[TG] Ping OK');
+    } catch (e) {
+      console.log('[TG] Ping failed, reconnecting...');
+      try { await client.connect(); } catch {}
+    }
+  }, 30000);
 };
 
 // Auth middleware
