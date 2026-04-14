@@ -62,6 +62,78 @@ const invoke = async (method, retries = 3) => {
 
 app.get('/', (req, res) => res.json({ status: 'ok', connected: client?.connected || false }));
 
+// Маппинг названий подарков на gift_id (получается через getStarGifts)
+const GIFT_NAME_MAP = {
+  'Yurak':    null,
+  'Ayiqcha':  null,
+  "Sovg'a":   null,
+  'Atirgul':  null,
+  'Tort':     null,
+  'Raketa':   null,
+  'Shampan':  null,
+  'Guldasta': null,
+  'Olmos':    null,
+  'Kubok':    null,
+  'Uzuk':     null,
+};
+
+// Fetch and cache gift list
+let cachedGifts = null;
+const getGifts = async () => {
+  if (cachedGifts) return cachedGifts;
+  const result = await invoke(new Api.payments.GetStarGifts({ hash: 0 }));
+  cachedGifts = result.gifts;
+  setTimeout(() => { cachedGifts = null; }, 60 * 60 * 1000); // cache 1h
+  return cachedGifts;
+};
+
+app.get('/gifts', auth, async (req, res) => {
+  try {
+    const gifts = await getGifts();
+    return res.json({ success: true, gifts: gifts.map(g => ({ id: g.id.toString(), stars: g.stars, limited: g.limited || false })) });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/send-gift', auth, async (req, res) => {
+  const { telegram_user_id, gift_id } = req.body;
+  if (!telegram_user_id || !gift_id) {
+    return res.status(422).json({ success: false, error: 'telegram_user_id and gift_id required' });
+  }
+
+  try {
+    const users = await invoke(new Api.users.GetUsers({
+      id: [new Api.InputUser({ userId: BigInt(telegram_user_id), accessHash: BigInt(0) })],
+    }));
+    if (!users?.[0]) throw new Error(`User ${telegram_user_id} not found`);
+    const user = users[0];
+    const peer = new Api.InputPeerUser({ userId: user.id, accessHash: user.accessHash });
+
+    const purpose = new Api.InputInvoiceStarGift({
+      peer,
+      giftId: BigInt(gift_id),
+      hideName: false,
+    });
+
+    const form = await invoke(new Api.payments.GetPaymentForm({
+      invoice: purpose,
+    }));
+
+    await invoke(new Api.payments.SendStarsForm({
+      formId: form.formId,
+      invoice: purpose,
+    }));
+
+    console.log(`[TG] Sent gift ${gift_id} to ${telegram_user_id}`);
+    return res.json({ success: true, external_id: form.formId?.toString() });
+
+  } catch (err) {
+    console.error('[TG] send-gift error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.post('/send-stars', auth, async (req, res) => {
   const { telegram_user_id, amount } = req.body;
   if (!telegram_user_id || !amount) {
