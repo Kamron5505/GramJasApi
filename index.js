@@ -110,18 +110,31 @@ app.get('/gifts', auth, async (req, res) => {
 });
 
 app.post('/send-gift', auth, async (req, res) => {
-  const { telegram_user_id, gift_id } = req.body;
-  if (!telegram_user_id || !gift_id) {
-    return res.status(422).json({ success: false, error: 'telegram_user_id and gift_id required' });
+  const { telegram_user_id, gift_id, username } = req.body;
+  if ((!telegram_user_id && !username) || !gift_id) {
+    return res.status(422).json({ success: false, error: 'username/telegram_user_id and gift_id required' });
   }
 
   try {
-    const users = await invoke(new Api.users.GetUsers({
-      id: [new Api.InputUser({ userId: BigInt(telegram_user_id), accessHash: BigInt(0) })],
-    }));
-    if (!users?.[0]) throw new Error(`User ${telegram_user_id} not found`);
-    const user = users[0];
-    const peer = new Api.InputPeerUser({ userId: user.id, accessHash: user.accessHash });
+    let peer;
+
+    if (username) {
+      // Resolve by username to get proper accessHash
+      const resolved = await invoke(new Api.contacts.ResolveUsername({
+        username: username.replace('@', '')
+      }));
+      const user = resolved.users?.[0];
+      if (!user) throw new Error(`User @${username} not found`);
+      peer = new Api.InputPeerUser({ userId: user.id, accessHash: user.accessHash });
+    } else {
+      // Try direct with zero hash (works if user is in contacts/cache)
+      const users = await invoke(new Api.users.GetUsers({
+        id: [new Api.InputUser({ userId: BigInt(telegram_user_id), accessHash: BigInt(0) })],
+      }));
+      const user = users?.[0];
+      if (!user) throw new Error(`User ${telegram_user_id} not found`);
+      peer = new Api.InputPeerUser({ userId: user.id, accessHash: user.accessHash });
+    }
 
     const purpose = new Api.InputInvoiceStarGift({
       peer,
@@ -129,16 +142,10 @@ app.post('/send-gift', auth, async (req, res) => {
       hideName: false,
     });
 
-    const form = await invoke(new Api.payments.GetPaymentForm({
-      invoice: purpose,
-    }));
+    const form = await invoke(new Api.payments.GetPaymentForm({ invoice: purpose }));
+    await invoke(new Api.payments.SendStarsForm({ formId: form.formId, invoice: purpose }));
 
-    await invoke(new Api.payments.SendStarsForm({
-      formId: form.formId,
-      invoice: purpose,
-    }));
-
-    console.log(`[TG] Sent gift ${gift_id} to ${telegram_user_id}`);
+    console.log(`[TG] Sent gift ${gift_id} to ${username || telegram_user_id}`);
     return res.json({ success: true, external_id: form.formId?.toString() });
 
   } catch (err) {
