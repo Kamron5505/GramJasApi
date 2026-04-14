@@ -87,6 +87,19 @@ const getGifts = async () => {
   return cachedGifts;
 };
 
+app.post('/resolve-user', auth, async (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.status(422).json({ success: false, error: 'username required' });
+  try {
+    const result = await invoke(new Api.contacts.ResolveUsername({ username: username.replace('@', '') }));
+    const user = result.users?.[0];
+    if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+    return res.json({ success: true, user_id: user.id.toString(), username: user.username });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/gifts', auth, async (req, res) => {
   try {
     const gifts = await getGifts();
